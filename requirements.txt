@@ -1,0 +1,7 @@
+setuptools
+PyHive
+numpy
+scikit-learn
+scipy
+git+https://github.com/RaRe-Technologies/gensim.git
+git+https://github.com/kmike/pymorphy2.git
