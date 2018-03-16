@@ -3,5 +3,7 @@ PyHive
 numpy
 scikit-learn
 scipy
+pandas
 git+https://github.com/RaRe-Technologies/gensim.git
 git+https://github.com/kmike/pymorphy2.git
+git+https://github.com/nltk/nltk.git
