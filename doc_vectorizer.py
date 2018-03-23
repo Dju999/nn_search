@@ -2,6 +2,8 @@
 import os
 import logging
 import pickle
+from collections import Counter
+import itertools as it
 
 import numpy as np
 import pymorphy2
@@ -41,8 +43,13 @@ else:
                 if (i not in list(string.punctuation)+['«','»','–']
                     and i not in nltk.corpus.stopwords.words('russian'))
             ]})
+        vocab_counter = Counter(it.chain(*corpus.values()))
+        min_count = 5
+        for k in corpus:
+            arr = corpus[k]
+            corpus[k] = [m for m in arr if vocab_counter[m] >= min_count]
         pickle.dump(corpus, open(corpus_file, 'wb'), protocol=2)
-    model = Word2Vec(sentences=corpus.values(), size=100, window=5, min_count=5, workers=10)
+    model = Word2Vec(sentences=corpus.values(), size=100, window=5, min_count=min_count, workers=10)
     word_vectors = model.wv
     del model
     word_vectors.save(f_name)
