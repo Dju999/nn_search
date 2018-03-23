@@ -4,6 +4,9 @@ numpy
 scikit-learn
 scipy
 pandas
+thrift
+sasl
+thrift_sasl
 git+https://github.com/RaRe-Technologies/gensim.git
 git+https://github.com/kmike/pymorphy2.git
 git+https://github.com/nltk/nltk.git
