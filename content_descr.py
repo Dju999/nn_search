@@ -6,6 +6,8 @@ from pyhive import hive
 import pickle
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s')
+logging.root.setLevel(level=logging.INFO)
 
 cursor = hive.connect('hadoop-spark-linx-4.vcp.digitalaccess.ru').cursor()
 
@@ -44,6 +46,7 @@ def get_content_dict():
     """
     cursor.execute(sql_str)
     data_sample = cursor.fetchall()
+    logger.info('Выгрузка данных')
     col_names = [i[0] for i in cursor.description]
     data_dict = {
         i: {col_names[col_num]: data_sample[i][col_num] for col_num in range(len(col_names))}
@@ -61,10 +64,12 @@ content_dict = get_content_dict()
 
 item2qid = dict()
 content_description = []
+logger.info('Запись TSV')
 f = open('content_descr.tsv', 'w')
 for k in content_dict:
     item_id = content_dict[k]['item_id']
-    item2qid[content_dict[k]['object_id']] = (item_id, k)
+    qid = content_dict[k]['object_id']
+    item2qid[item_id] = qid
     descr = content_dict[k]['descr'].replace(u'\xa0', u' ').replace('\n', ' ')
     f.write('{}\t{}\n'.format(item_id, descr))
 f.close()
