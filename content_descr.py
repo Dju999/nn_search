@@ -70,7 +70,7 @@ for k in content_dict:
     item_id = content_dict[k]['item_id']
     qid = content_dict[k]['object_id']
     item2qid[item_id] = qid
-    descr = content_dict[k]['descr'].replace(u'\xa0', u' ').replace('\n', ' ')
+    descr = content_dict[k]['descr'].replace(u'\xa0', u' ').replace('\n', ' ').replace('\t', ' ')
     f.write('{}\t{}\n'.format(item_id, descr))
 f.close()
 pickle.dump(item2qid, open('item2qid.pkl', 'wb'), protocol=2)

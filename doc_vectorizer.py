@@ -4,6 +4,7 @@ import logging
 import pickle
 from collections import Counter
 import itertools as it
+import re
 
 import numpy as np
 import pymorphy2
@@ -22,7 +23,7 @@ logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 wv_file = 'wv_keyed_vectors.w2v'
-corpus_file = 'ivi_corpus.pkl'
+corpus_file = 'ivi_corpus_tokenized.pkl'
 d2v_file = 'doc2vec.pkl'
 item_to_qid_file = 'item2qid.pkl'
 content_descr_file = 'content_descr.tsv'
@@ -31,129 +32,196 @@ array_file = 'content_array.pkl'
 vectorized_file = 'corpus_vectors.pkl'
 MIN_TOKEN_COUNT = 1
 
-def tokenize_tsv(content_descr_file, tokenized_corpus_file):
-    """Разбиение текстовых строк на токены
-    Каждый токен приводим к нормальной форме
+config = {
+    "working_dir": 'data',
+    "content_description_raw": 'content_descr.tsv',
+    "content_descr_tokens": 'ivi_corpus_tokenized.pkl',
+    "content_descr_vectors": 'ivi_corpus_vectorized.pkl',
+    "word_vectors_file": 'wv_keyed_vectors.w2v',
+    "item_to_qid_file": 'item2qid.pkl',
+    'content_array_file': 'content_array_file'
+}
 
-    :param content_descr_file: tsv с текстовым описанием контента
-    :param tokenized_corpus_file: файл, в который дампим токены
-    :return: dict {obj_id: tokens}
+
+class Content2Vec(object):
+    """Получаем эмбеддинг контента из текстового описани
     """
-    if os.path.isfile(tokenized_corpus_file):
-        corpus = pickle.load(open(tokenized_corpus_file, 'rb'))
-    else:
-        txt = open(content_descr_file, 'r').readlines()
-        corpus = dict()
-        n = 0
-        for t in txt:
-            n += 1
-            words = np.array(word_tokenize(t))
-            if n % 1000 == 0:
-                logger.info("doc {}".format(n))
-            corpus.update({words[0]: [
-                morph.parse(str(i).lower())[0].normal_form for i in words[1:]
-                if (i not in list(string.punctuation) + ['«', '»', '–']
-                    and i not in nltk.corpus.stopwords.words('russian'))
-            ]})
-    corpus = filter_corpus(corpus, min_count=MIN_TOKEN_COUNT)
-    pickle.dump(corpus, open(tokenized_corpus_file, 'wb'), protocol=2)
-    return corpus
 
-def filter_corpus(corpus, min_count = 5):
-    """Удаляем низкочастотные слова из корпуса"""
-    vocab_counter = Counter(it.chain(*corpus.values()))
-    logger.info('Filter rare words')
-    for k in corpus:
-        arr = corpus[k]
-        corpus[k] = [m for m in arr if vocab_counter[m] >= min_count]
-    return corpus
+    def __init__(self, config):
+        self.wd = config["working_dir"]
+        if not os.path.isdir('data'):
+            os.mkdir(self.wd)
+        self.morph = pymorphy2.MorphAnalyzer()
+        self.content_descr_raw = config["content_description_raw"]
+        self.item_to_qid_file = config["item_to_qid_file"]
+        self.content_descr_tokens = os.path.join(self.wd, config["content_descr_tokens"])
+        self.word_vectors_file = os.path.join(self.wd, config["word_vectors_file"])
+        self.content_vectors_file = os.path.join(self.wd, config["content_descr_vectors"])
+        self.content_array_file = os.path.join(self.wd, config["content_array_file"])
+        self.item2qid = pickle.load(open(self.item_to_qid_file, 'rb'))
+        self.tokenized_corpus = None
+        self.word_vectors = None
+        self.content_vectors = None
+        self.content_data = None
+        self.content_qids = None
+        self.content_vectors_array = None
+        self.content_index_array = None
+        self.search_index = None
 
-def vectorize_tokens(corpus, wv_file):
-    """Обучение Word2Vec"""
-    if os.path.isfile(wv_file):
-        word_vectors = KeyedVectors.load(wv_file)
-    else:
-        model = Word2Vec(
-            sentences=corpus.values(), size=100, window=5,
-            min_count=MIN_TOKEN_COUNT, workers=10)
-        word_vectors = model.wv
-        del model
-    word_vectors.save(wv_file)
-    return word_vectors
+    def build(self):
+        """Инициализируем поля класса
+        
+        :return: 
+        """
+        # получаем эмбеддинги контента и токенов
+        self.content_to_vec()
+        self.build_search_index()
 
-def group_by_index(prepared_text_corpus, item2qid):
-    """Собираем серии для каждого сериала в один документ"""
-    grouped_dict = dict()
-    for k in prepared_text_corpus:
-        raw_tokens = prepared_text_corpus[k]
-        if isinstance(raw_tokens, np.float64):
-            raw_tokens = np.zeros(100)
-        group_key = item2qid.get(int(k), int(k))
-        if doc2vec.get(group_key) is None:
-            grouped_dict[group_key] = raw_tokens
+    def content_to_vec(self):
+        """Получаем векторное описание для каждого контента
+        
+        :return: 
+        """
+        # конвертируем описание контента в токены
+        self.tokenize_tsv()
+        # для каждого токена получаем векторное описание с помощью Word2Vec
+        self.vectorize_tokens()
+        logger.info("планета {}".format(self.word_vectors.most_similar('планета')))
+        logger.info("Векторизуем корпус текстов")
+        self.vectorize_content()
+
+    def tokenize_tsv(self):
+        """Разбиение текстовых строк на токены
+        Каждый токен приводим к нормальной форме
+
+        :return: dict {obj_id: tokens}
+        """
+        if os.path.isfile(self.content_descr_tokens):
+            self.tokenized_corpus = pickle.load(open(self.content_descr_tokens, 'rb'))
         else:
-            grouped_dict[group_key] = np.hstack(grouped_dict[group_key], raw_tokens)
-    return grouped_dict
+            txt = open(self.content_descr_raw, 'r').readlines()
+            self.tokenized_corpus = dict()
+            n = 0
+            for t in txt:
+                n += 1
+                content_id, content_descr = t.split('\t')
+                if n % 1000 == 0:
+                    logger.info("doc {}".format(n))
+                self.tokenized_corpus.update({content_id: self.str2tokens(content_descr)})
+            self.tokenized_corpus = self.filter_corpus(min_count=MIN_TOKEN_COUNT)
+            # объединяем эмбеддинги серий в эмбеддинг сериала
+            self.tokenized_corpus = self.group_compilations()
+            pickle.dump(self.tokenized_corpus, open(self.content_descr_tokens, 'wb'), protocol=2)
+        print('tokenize_csv()', self.tokenized_corpus)
+        return self.tokenized_corpus
 
-def vectorize_doc(prepared_text_corpus, word_vectors, d2v_file):
-    if os.path.isfile(d2v_file):
-        doc2vec = pickle.load(open(d2v_file, 'rb'))
-    else:
-        doc2vec = dict()
-        for k in prepared_text_corpus:
-            raw_tokens = prepared_text_corpus[k]
-            token_vectors = np.array([word_vectors[t] for t in raw_tokens])
-            d2v = token_vectors.mean(axis=0)
-            doc2vec[k] = np.zeros(100) if isinstance(d2v, np.float64) else d2v
-    pickle.dump(doc2vec, open(d2v_file, 'wb'), protocol=2)
-    return doc2vec
+    def token2normal(self, raw_token):
+        """Превращаем строку в набор токенов
+        
+        :param raw_string: 
+        :return: 
+        """
+        return self.morph.parse(str(raw_token).lower())[0].normal_form
 
-def prepare_doc(corpus_file, content_descr_file, vectorized_corpus_file):
-    """Векторизуем TSV файл
+    def str2tokens(self, raw_string):
+        words = np.array(word_tokenize(raw_string.replace('.', ' ')))
+        return [
+            self.token2normal(i) for i in words
+            if (i not in list(string.punctuation) + ['«', '»', '–']
+                and i not in nltk.corpus.stopwords.words('russian'))
+        ]
 
-    :return:
-    """
-    tokenized_corpus = tokenize_tsv(content_descr_file, corpus_file)
-    word_vectors = vectorize_tokens(tokenized_corpus, wv_file)
+    def tokens2vec(self, raw_tokens):
+        token_vectors = np.array([self.word_vectors[t] for t in raw_tokens])
+        # вектор контента - это усреднение векторов его токенов
+        agg_token_vectors = token_vectors.mean(axis=0)
+        return agg_token_vectors
 
-    logger.info("любовь {}".format(word_vectors.most_similar('любовь')))
-    logger.info("Векторизуем корпус текстов")
-    vectorized_doc = vectorize_doc(tokenized_corpus, word_vectors, vectorized_corpus_file)
-    return vectorized_doc
+    def filter_corpus(self, min_count):
+        """Удаляем низкочастотные слова из корпуса"""
+        vocab_counter = Counter(it.chain(*self.tokenized_corpus.values()))
+        logger.info('Filter rare words')
+        for k in self.tokenized_corpus:
+            arr = self.tokenized_corpus[k]
+            filtered_arr = np.array([m for m in arr if vocab_counter[m] >= min_count])
+            self.tokenized_corpus[k] = filtered_arr if len(filtered_arr) > 0 else np.array(['empty'])
+        return self.tokenized_corpus
 
-def make_query(search_tree, test_vector, docs):
-    dist, ind = search_tree.query(test_vector.reshape(1, -1), k=3)
-    search_result = [docs[i] for i in ind[0]]
-    # индекс контента
-    qids = [int(k) for k in search_result]
-    return qids
+    def vectorize_tokens(self):
+        """Обучение Word2Vec"""
+        if os.path.isfile(wv_file):
+            self.word_vectors = KeyedVectors.load(self.word_vectors_file)
+        else:
+            # print("tokenized corpus \n", list(self.tokenized_corpus.values()))
+            model = Word2Vec(
+                sentences=list(self.tokenized_corpus.values()), size=100, window=5,
+                min_count=MIN_TOKEN_COUNT, workers=5)
+            self.word_vectors = model.wv
+            del model
+            self.word_vectors.save(self.word_vectors_file)
+        # print(self.word_vectors.wv.vocab)
+        return self.word_vectors
 
-def dict2array(corpus_dict, content_vecs_file):
-    if os.path.isfile(content_vecs_file):
-        content_data = pickle.load(open(content_vecs_file, 'rb'))
-    else:
-        content_data = np.vstack([
+    def vectorize_content(self):
+        if os.path.isfile(self.content_vectors_file):
+            self.content_vectors = pickle.load(open(self.content_vectors_file, 'rb'))
+        else:
+            self.content_vectors = dict()
+            for k in self.tokenized_corpus:
+                raw_tokens = self.tokenized_corpus[k]
+                current_content_vector = self.tokens2vec(raw_tokens)
+                self.content_vectors[k] = (
+                    np.zeros(100).tolist()
+                    if isinstance(current_content_vector, np.float64)
+                    else current_content_vector.tolist()
+                )
+            pickle.dump(self.content_vectors, open(self.content_vectors_file, 'wb'), protocol=2)
+        # print("vectorize content\n", self.content_vectors)
+        self.content_qids = list(self.content_vectors.keys())
+        return self.content_vectors
+
+    def group_compilations(self):
+        """Собираем серии для каждого сериала в один вектор"""
+        grouped_dict = dict()
+        for k in self.tokenized_corpus:
+            raw_tokens = self.tokenized_corpus[k]
+            if isinstance(raw_tokens, np.float64):
+                raw_tokens = np.zeros(100).tolist()
+            group_key = self.item2qid[int(k)]
+            if grouped_dict.get(group_key) is None:
+                grouped_dict[group_key] = raw_tokens.tolist()
+            else:
+                grouped_dict[group_key] = np.hstack([grouped_dict[group_key], raw_tokens]).tolist()
+        return grouped_dict
+
+    def dict2array(self):
+        self.content_vectors_array = np.vstack([
             np.zeros(100) if isinstance(i, np.float64) else i
-            for i in list(corpus_dict.values())
+            for i in list(self.content_vectors.values())
         ])
+        pickle.dump(self.content_vectors_array, open(self.content_array_file, 'wb'), protocol=2)
+        self.content_index_array = np.array(list(self.content_vectors.keys()))
+        return self.content_vectors_array
 
-        pickle.dump(content_data, open(content_vecs_file, 'wb'), protocol=2)
-    return content_data, list(corpus_dict.keys())
+    def build_search_index(self):
+        """Формируем индекс для поиска по контенту"""
+        # преобразуем в матрицу - для поиска ближайших соседей
+        self.dict2array()
+        self.search_index = BallTree(self.content_vectors_array, leaf_size=40, metric='minkowski')
 
-logger.info("Загружаем индекс документов")
-doc2vec = prepare_doc(corpus_file, content_descr_file, vectorized_file)
-logger.info("Загружаем векторы слов")
-word_vectors = KeyedVectors.load(wv_file)
-# группируем контент из одиночных серий в сериалы
-item2qid = pickle.load(open(item_to_qid_file, 'rb'))
-logger.info('Корпус документов: {}'.format(len(list(doc2vec.keys()))))
-grouped_docs = group_by_index(doc2vec, item2qid)
-grouped_docs_keys = list(grouped_docs.keys())
-logger.info('Сгруппированные документы: {}'.format(len(grouped_docs_keys)))
-logger.info("Формируем индекс контента")
-content_data, content_qids = dict2array(grouped_docs, array_file)
-# объект для поиска
-nn_search = BallTree(content_data, leaf_size=40, metric='minkowski')
-test_vector = word_vectors['любовь']
-qids = make_query(nn_search, test_vector, content_qids)
-logger.info("Кинчики о любви {}".format(qids))
+    def make_query(self, query_str):
+        query_tokens = self.str2tokens(query_str)
+        query_vec = self.tokens2vec(query_tokens)
+        dist, ind = self.search_index.query(query_vec.reshape(1, -1), k=3)
+        print(ind)
+        search_result = [self.content_qids[i] for i in ind[0]]
+        # индекс контента
+        qids = [int(k) for k in search_result]
+        print("Контент по запросу {}: {}".format(query_str, qids))
+        return qids
+
+
+if __name__ == '__main__':
+    content2vec = Content2Vec(config)
+    content2vec.build()
+    content2vec.make_query('планета')
