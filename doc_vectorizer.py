@@ -14,6 +14,9 @@ morph = pymorphy2.MorphAnalyzer()
 from gensim.models import KeyedVectors, Word2Vec
 import nltk
 from nltk import word_tokenize
+# для tf-idf
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
 
 from sklearn.neighbors import BallTree
 
@@ -66,7 +69,11 @@ class Content2Vec(object):
         self.content_qids = None
         self.content_vectors_array = None
         self.content_index_array = None
-        self.search_index = None
+        self.search_index_wv = None
+        self.cnt_vectorizer = CountVectorizer()
+        self.tf_idf = TfidfTransformer(smooth_idf=False)
+        self.tf_idf_features = None
+        self.search_index_tfidf = None
 
     def build(self):
         """Инициализируем поля класса
@@ -92,7 +99,7 @@ class Content2Vec(object):
 
     def tokenize_tsv(self):
         """Разбиение текстовых строк на токены
-        Каждый токен приводим к нормальной форме
+        Каждый токен приводим к нормальной форме. Группируем контент в сборники
 
         :return: dict {obj_id: tokens}
         """
@@ -107,12 +114,14 @@ class Content2Vec(object):
                 content_id, content_descr = t.split('\t')
                 if n % 1000 == 0:
                     logger.info("doc {}".format(n))
-                self.tokenized_corpus.update({content_id: self.str2tokens(content_descr)})
+                self.tokenized_corpus.update({int(content_id): self.str2tokens(content_descr)})
             self.tokenized_corpus = self.filter_corpus(min_count=MIN_TOKEN_COUNT)
             # объединяем эмбеддинги серий в эмбеддинг сериала
             self.tokenized_corpus = self.group_compilations()
             pickle.dump(self.tokenized_corpus, open(self.content_descr_tokens, 'wb'), protocol=2)
-        print('tokenize_csv()', self.tokenized_corpus)
+        # print('tokenize_csv()', self.tokenized_corpus)
+        #print(list(self.tokenized_corpus.keys())[:10])
+        #print(self.tokenized_corpus[1092450])
         return self.tokenized_corpus
 
     def token2normal(self, raw_token):
@@ -131,11 +140,15 @@ class Content2Vec(object):
                 and i not in nltk.corpus.stopwords.words('russian'))
         ]
 
-    def tokens2vec(self, raw_tokens):
-        token_vectors = np.array([self.word_vectors[t] for t in raw_tokens])
-        # вектор контента - это усреднение векторов его токенов
-        agg_token_vectors = token_vectors.mean(axis=0)
-        return agg_token_vectors
+    def tokens2vec(self, raw_tokens, engine='w2v'):
+        agg_tokens_vector = []
+        if engine == 'w2v':
+            token_vectors = np.array([self.word_vectors[t] for t in raw_tokens])
+            # вектор контента - это усреднение векторов его токенов
+            agg_tokens_vector = token_vectors.mean(axis=0)
+        elif engine == 'tfidf':
+            agg_tokens_vector = self.cnt_vectorizer.transform([' '.join(raw_tokens)]).toarray()
+        return agg_tokens_vector
 
     def filter_corpus(self, min_count):
         """Удаляем низкочастотные слова из корпуса"""
@@ -149,7 +162,7 @@ class Content2Vec(object):
 
     def vectorize_tokens(self):
         """Обучение Word2Vec"""
-        if os.path.isfile(wv_file):
+        if os.path.isfile(self.word_vectors_file):
             self.word_vectors = KeyedVectors.load(self.word_vectors_file)
         else:
             # print("tokenized corpus \n", list(self.tokenized_corpus.values()))
@@ -163,21 +176,26 @@ class Content2Vec(object):
         return self.word_vectors
 
     def vectorize_content(self):
+        # строим матрицу tf-idf
+        text_corpus = [' '.join(list(k)) for k in self.tokenized_corpus.values()]
+        sparse_token_counters = self.cnt_vectorizer.fit_transform(text_corpus)
+        self.tf_idf_features = self.tf_idf.fit_transform(sparse_token_counters)
+        self.tf_idf_features.astype(np.float32)
+        print("tf-idf features ", self.tf_idf_features.toarray().shape)
+        # усредняем векторы Word2Vec
         if os.path.isfile(self.content_vectors_file):
             self.content_vectors = pickle.load(open(self.content_vectors_file, 'rb'))
         else:
             self.content_vectors = dict()
             for k in self.tokenized_corpus:
                 raw_tokens = self.tokenized_corpus[k]
-                current_content_vector = self.tokens2vec(raw_tokens)
+                current_content_vector = self.tokens2vec(raw_tokens, engine='w2v')
                 self.content_vectors[k] = (
                     np.zeros(100).tolist()
                     if isinstance(current_content_vector, np.float64)
                     else current_content_vector.tolist()
                 )
             pickle.dump(self.content_vectors, open(self.content_vectors_file, 'wb'), protocol=2)
-        # print("vectorize content\n", self.content_vectors)
-        self.content_qids = list(self.content_vectors.keys())
         return self.content_vectors
 
     def group_compilations(self):
@@ -207,14 +225,18 @@ class Content2Vec(object):
         """Формируем индекс для поиска по контенту"""
         # преобразуем в матрицу - для поиска ближайших соседей
         self.dict2array()
-        self.search_index = BallTree(self.content_vectors_array, leaf_size=40, metric='minkowski')
+        logger.info("Строим поисковый индекс")
+        self.search_index_wv = BallTree(self.content_vectors_array, leaf_size=40, metric='braycurtis')
+        # для tf-idf chebyshev, euclidean
+        self.search_index_tfidf = BallTree(self.tf_idf_features.todense(), leaf_size=40, metric='manhattan')
+        logger.info("Построили индекс tf-idf")
 
-    def make_query(self, query_str):
+    def make_query(self, query_str, engine='w2v'):
         query_tokens = self.str2tokens(query_str)
-        query_vec = self.tokens2vec(query_tokens)
-        dist, ind = self.search_index.query(query_vec.reshape(1, -1), k=3)
-        print(ind)
-        search_result = [self.content_qids[i] for i in ind[0]]
+        print(query_tokens)
+        query_vec = self.tokens2vec(query_tokens, engine=engine)
+        dist, ind = self.search_index_wv.query(query_vec.reshape(1, -1), k=5)
+        search_result = [self.content_index_array[i] for i in ind[0]]
         # индекс контента
         qids = [int(k) for k in search_result]
         print("Контент по запросу {}: {}".format(query_str, qids))
@@ -224,4 +246,5 @@ class Content2Vec(object):
 if __name__ == '__main__':
     content2vec = Content2Vec(config)
     content2vec.build()
-    content2vec.make_query('планета')
+    # content2vec.make_query('Ирландия', engine='w2v')
+    content2vec.make_query('Ирландия', engine='tfidf')
