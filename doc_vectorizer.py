@@ -17,6 +17,7 @@ from nltk import word_tokenize
 # для tf-idf
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_extraction.text import TfidfTransformer
+import pysparnn.cluster_index as ci
 
 from sklearn.neighbors import BallTree
 
@@ -218,7 +219,7 @@ class Content2Vec(object):
             for i in list(self.content_vectors.values())
         ])
         pickle.dump(self.content_vectors_array, open(self.content_array_file, 'wb'), protocol=2)
-        self.content_index_array = np.array(list(self.content_vectors.keys()))
+        self.content_index_array = np.array(list(self.content_vectors.keys()), dtype=np.uint32)
         return self.content_vectors_array
 
     def build_search_index(self):
@@ -226,20 +227,30 @@ class Content2Vec(object):
         # преобразуем в матрицу - для поиска ближайших соседей
         self.dict2array()
         logger.info("Строим поисковый индекс")
-        self.search_index_wv = BallTree(self.content_vectors_array, leaf_size=40, metric='braycurtis')
+        # self.search_index_wv = BallTree(self.content_vectors_array, leaf_size=40, metric='braycurtis')
         # для tf-idf chebyshev, euclidean
-        self.search_index_tfidf = BallTree(self.tf_idf_features.todense(), leaf_size=40, metric='manhattan')
+        # self.search_index_tfidf = BallTree(self.tf_idf_features.todense(), leaf_size=40, metric='manhattan')
+        # либа от FacebookResearch
+        print('shape ftrs {}, content_index_array {}'.format(
+            self.tf_idf_features.shape, self.content_index_array.shape))
+        self.search_index_tfidf = ci.MultiClusterIndex(self.tf_idf_features.todense(), np.arange(self.content_index_array.size))
         logger.info("Построили индекс tf-idf")
 
     def make_query(self, query_str, engine='w2v'):
         query_tokens = self.str2tokens(query_str)
         print(query_tokens)
         query_vec = self.tokens2vec(query_tokens, engine=engine)
-        dist, ind = self.search_index_wv.query(query_vec.reshape(1, -1), k=5)
+        if engine == 'w2v':
+            dist, ind = self.search_index_wv.query(query_vec.reshape(1, -1), k=5)
+        elif engine == 'tfidf':
+            dist, ind = None, self.search_index_tfidf.search(query_vec, k=5, k_clusters=10, return_distance=False)
+        print(dist, ind)
         search_result = [self.content_index_array[i] for i in ind[0]]
         # индекс контента
         qids = [int(k) for k in search_result]
         print("Контент по запросу {}: {}".format(query_str, qids))
+        for i in qids:
+            print('{}: {}'.format(i, self.tokenized_corpus[i]))
         return qids
 
 
