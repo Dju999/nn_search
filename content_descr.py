@@ -12,7 +12,10 @@ logging.root.setLevel(level=logging.INFO)
 cursor = hive.connect('hadoop-spark-linx-4.vcp.digitalaccess.ru').cursor()
 
 sql_str = """
-    SELECT item_id, object_id, is_serial, descr from (
+    SELECT 
+        item_id, object_id, is_serial, raw_stat.descr, 
+        case when c.compilation_id is null then c.title else cmp.title end as title
+    from (
                 SELECT DISTINCT
                     CASE WHEN compilation_id IS NULL THEN 0 ELSE 1 END as is_serial,
                     c.id as item_id,
@@ -35,6 +38,10 @@ sql_str = """
                 WHERE status = 3
                     AND content_category_id NOT IN (1, 16, 18)
     ) as raw_stat
+    inner join groot.content_bd1 as c
+        on object_id = CASE WHEN compilation_id IS NULL THEN c.id*10 ELSE compilation_id*10+1 END
+    LEFT JOIN groot.compilation_bd1 as cmp
+        on cmp.id = c.compilation_id
 """
 
 
@@ -63,6 +70,7 @@ def get_content_dict():
 content_dict = get_content_dict()
 
 item2qid = dict()
+qid2title = dict()
 content_description = []
 logger.info('Запись TSV')
 f = open('content_descr.tsv', 'w')
@@ -70,7 +78,9 @@ for k in content_dict:
     item_id = content_dict[k]['item_id']
     qid = content_dict[k]['object_id']
     item2qid[item_id] = qid
+    qid2title[int(qid)] = content_dict[k]['object_title']
     descr = content_dict[k]['descr'].replace(u'\xa0', u' ').replace('\n', ' ').replace('\t', ' ')
     f.write('{}\t{}\n'.format(item_id, descr))
 f.close()
 pickle.dump(item2qid, open('item2qid.pkl', 'wb'), protocol=2)
+pickle.dump(qid2title, open('qid2title.pkl', 'wb'), protocol=2)

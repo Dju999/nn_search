@@ -4,14 +4,15 @@ import logging
 import pickle
 from collections import Counter
 import itertools as it
-import re
 
 import numpy as np
 import pymorphy2
 import string
 morph = pymorphy2.MorphAnalyzer()
 
-from gensim.models import KeyedVectors, Word2Vec
+from gensim.models import KeyedVectors, Word2Vec, TfidfModel
+from gensim.similarities import Similarity
+from gensim.corpora import Dictionary
 import nltk
 from nltk import word_tokenize
 # для tf-idf
@@ -43,7 +44,8 @@ config = {
     "content_descr_vectors": 'ivi_corpus_vectorized.pkl',
     "word_vectors_file": 'wv_keyed_vectors.w2v',
     "item_to_qid_file": 'item2qid.pkl',
-    'content_array_file': 'content_array_file'
+    'content_array_file': 'content_array_file',
+    'qid_to_title_file': 'qid2title.pkl'
 }
 
 
@@ -58,6 +60,7 @@ class Content2Vec(object):
         self.morph = pymorphy2.MorphAnalyzer()
         self.content_descr_raw = config["content_description_raw"]
         self.item_to_qid_file = config["item_to_qid_file"]
+        self.qid_to_title_file = config["qid_to_title_file"]
         self.content_descr_tokens = os.path.join(self.wd, config["content_descr_tokens"])
         self.word_vectors_file = os.path.join(self.wd, config["word_vectors_file"])
         self.content_vectors_file = os.path.join(self.wd, config["content_descr_vectors"])
@@ -75,6 +78,8 @@ class Content2Vec(object):
         self.tf_idf = TfidfTransformer(smooth_idf=False)
         self.tf_idf_features = None
         self.search_index_tfidf = None
+        self.gensim_content_index = None
+        self.gensim_model = None
 
     def build(self):
         """Инициализируем поля класса
@@ -94,7 +99,7 @@ class Content2Vec(object):
         self.tokenize_tsv()
         # для каждого токена получаем векторное описание с помощью Word2Vec
         self.vectorize_tokens()
-        logger.info("планета {}".format(self.word_vectors.most_similar('планета')))
+        logger.info("ирландия {}".format(self.word_vectors.most_similar('ирландия')))
         logger.info("Векторизуем корпус текстов")
         self.vectorize_content()
 
@@ -120,9 +125,6 @@ class Content2Vec(object):
             # объединяем эмбеддинги серий в эмбеддинг сериала
             self.tokenized_corpus = self.group_compilations()
             pickle.dump(self.tokenized_corpus, open(self.content_descr_tokens, 'wb'), protocol=2)
-        # print('tokenize_csv()', self.tokenized_corpus)
-        #print(list(self.tokenized_corpus.keys())[:10])
-        #print(self.tokenized_corpus[1092450])
         return self.tokenized_corpus
 
     def token2normal(self, raw_token):
@@ -149,6 +151,8 @@ class Content2Vec(object):
             agg_tokens_vector = token_vectors.mean(axis=0)
         elif engine == 'tfidf':
             agg_tokens_vector = self.cnt_vectorizer.transform([' '.join(raw_tokens)]).toarray()
+        elif engine == 'gensim-tfidf':
+            agg_tokens_vector = self.dct.doc2bow(raw_tokens)
         return agg_tokens_vector
 
     def filter_corpus(self, min_count):
@@ -225,37 +229,46 @@ class Content2Vec(object):
     def build_search_index(self):
         """Формируем индекс для поиска по контенту"""
         # преобразуем в матрицу - для поиска ближайших соседей
+        """ 
+        # Чёт не зашло - построение индекса Word2Vec, поиск по tf-idf векторам
         self.dict2array()
         logger.info("Строим поисковый индекс")
-        # self.search_index_wv = BallTree(self.content_vectors_array, leaf_size=40, metric='braycurtis')
+        self.search_index_wv = BallTree(self.content_vectors_array, leaf_size=40, metric='braycurtis')
         # для tf-idf chebyshev, euclidean
-        # self.search_index_tfidf = BallTree(self.tf_idf_features.todense(), leaf_size=40, metric='manhattan')
-        # либа от FacebookResearch
+        self.search_index_tfidf = BallTree(self.tf_idf_features.todense(), leaf_size=40, metric='manhattan')
+        # библиотека от FacebookResearch
         print('shape ftrs {}, content_index_array {}'.format(
-            self.tf_idf_features.shape, self.content_index_array.shape))
-        self.search_index_tfidf = ci.MultiClusterIndex(self.tf_idf_features.todense(), np.arange(self.content_index_array.size))
-        logger.info("Построили индекс tf-idf")
+             self.tf_idf_features.shape, self.content_index_array.shape))
+        self.search_index_tfidf = ci.MultiClusterIndex(self.tf_idf_features.todense(), np.arange(self.content_index_array.size), num_indexes=2)
+        """
+        corpus_bow = list(self.tokenized_corpus.values())
+        self.gensim_content_index = list(self.tokenized_corpus.keys())
+        self.dct = Dictionary(corpus_bow)
+        gensim_corpus = [self.dct.doc2bow(line) for line in corpus_bow]
+        self.gensim_model = TfidfModel(gensim_corpus)
+        self.search_index_gensim = Similarity('data', self.gensim_model[gensim_corpus], num_features=len(self.dct))
+        logger.info("Построили индекс gensim tf-idf")
 
     def make_query(self, query_str, engine='w2v'):
         query_tokens = self.str2tokens(query_str)
-        print(query_tokens)
         query_vec = self.tokens2vec(query_tokens, engine=engine)
         if engine == 'w2v':
-            dist, ind = self.search_index_wv.query(query_vec.reshape(1, -1), k=5)
+            dist, ind = self.search_index_wv.query(query_vec.reshape(1, -1), k=5)[0]
         elif engine == 'tfidf':
-            dist, ind = None, self.search_index_tfidf.search(query_vec, k=5, k_clusters=10, return_distance=False)
-        print(dist, ind)
-        search_result = [self.content_index_array[i] for i in ind[0]]
+            dist, ind = None, self.search_index_tfidf.search(query_vec, k=5, k_clusters=1, return_distance=False, num_indexes=2)[0]
+        elif engine == 'gensim-tfidf':
+            dist, ind = None, self.search_index_gensim[self.gensim_model[query_vec]]
+            ind = np.argsort(-ind)[:10]
+        gensim_result = [self.gensim_content_index[int(i)] for i in ind]
         # индекс контента
-        qids = [int(k) for k in search_result]
-        print("Контент по запросу {}: {}".format(query_str, qids))
+        qids = [int(k) for k in gensim_result]
         for i in qids:
             print('{}: {}'.format(i, self.tokenized_corpus[i]))
         return qids
 
 
 if __name__ == '__main__':
+    """Пример работы алгоритма"""
     content2vec = Content2Vec(config)
     content2vec.build()
-    # content2vec.make_query('Ирландия', engine='w2v')
-    content2vec.make_query('Ирландия', engine='tfidf')
+    content2vec.make_query('Ирландия', engine='gensim-tfidf')
