@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s')
 logging.root.setLevel(level=logging.INFO)
 
-cursor = hive.connect('hadoop-spark-linx-4.vcp.digitalaccess.ru').cursor()
+cursor = hive.connect('ВАШ СЕРВЕР HIVE').cursor()
 
 sql_str = """
     SELECT 
