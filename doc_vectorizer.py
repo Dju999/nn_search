@@ -66,6 +66,7 @@ class Content2Vec(object):
         self.content_vectors_file = os.path.join(self.wd, config["content_descr_vectors"])
         self.content_array_file = os.path.join(self.wd, config["content_array_file"])
         self.item2qid = pickle.load(open(self.item_to_qid_file, 'rb'))
+        self.qid2title = pickle.load(open(self.qid_to_title_file, 'rb'))
         self.tokenized_corpus = None
         self.word_vectors = None
         self.content_vectors = None
@@ -98,10 +99,10 @@ class Content2Vec(object):
         # конвертируем описание контента в токены
         self.tokenize_tsv()
         # для каждого токена получаем векторное описание с помощью Word2Vec
-        self.vectorize_tokens()
-        logger.info("ирландия {}".format(self.word_vectors.most_similar('ирландия')))
+        # self.vectorize_tokens()
+        # logger.info("ирландия {}".format(self.word_vectors.most_similar('ирландия')))
         logger.info("Векторизуем корпус текстов")
-        self.vectorize_content()
+        # self.vectorize_content()
 
     def tokenize_tsv(self):
         """Разбиение текстовых строк на токены
@@ -258,12 +259,12 @@ class Content2Vec(object):
             dist, ind = None, self.search_index_tfidf.search(query_vec, k=5, k_clusters=1, return_distance=False, num_indexes=2)[0]
         elif engine == 'gensim-tfidf':
             dist, ind = None, self.search_index_gensim[self.gensim_model[query_vec]]
-            ind = np.argsort(-ind)[:10]
+            ind = np.argsort(-ind)[:15]
         gensim_result = [self.gensim_content_index[int(i)] for i in ind]
         # индекс контента
         qids = [int(k) for k in gensim_result]
         for i in qids:
-            print('{}: {}'.format(i, self.tokenized_corpus[i]))
+            print('{}: {}'.format(i, self.qid2title[i]))
         return qids
 
 
